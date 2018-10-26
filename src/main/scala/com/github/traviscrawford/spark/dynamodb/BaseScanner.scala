@@ -67,7 +67,7 @@ private[dynamodb] trait BaseScanner {
       querySpec.withProjectionExpression(expr.getProjectionExpression))
 
     // Parse any filter expression passed in as an option
-    val parsedFilterExpr = config.maybeFilterExpression
+    val parsedFilterExpr = config.maybeKeyExpression
       .map(filterExpression => ParsedFilterExpression(filterExpression))
     val filterNameMap = parsedFilterExpr.map(_.expressionNames).getOrElse(Map.empty)
     val filterValueMap = parsedFilterExpr.map(_.expressionValues).getOrElse(Map.empty)
@@ -77,7 +77,9 @@ private[dynamodb] trait BaseScanner {
     // Combine parsed name and value maps from the projections and filter expressions
     val nameMap = projectionNameMap ++ filterNameMap
     Option(nameMap).filter(_.nonEmpty).foreach(nMap => querySpec.withNameMap(nMap.asJava))
-    val valueMap = projectionValueMap ++ filterValueMap
+    val valueMap = projectionValueMap ++ filterValueMap.map{
+      case (key, value) => key -> value.toString
+    }
     Option(valueMap).filter(_.nonEmpty).foreach(vMap => querySpec.withValueMap(vMap.asJava))
 
     querySpec
