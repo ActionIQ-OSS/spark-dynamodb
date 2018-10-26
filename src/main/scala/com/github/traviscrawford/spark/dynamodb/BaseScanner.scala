@@ -5,7 +5,7 @@ import com.amazonaws.client.builder.AwsClientBuilder.EndpointConfiguration
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder
 import com.amazonaws.services.dynamodbv2.document.DynamoDB
 import com.amazonaws.services.dynamodbv2.document.Table
-import com.amazonaws.services.dynamodbv2.document.spec.ScanSpec
+import com.amazonaws.services.dynamodbv2.document.spec.{QuerySpec, ScanSpec}
 import com.amazonaws.services.dynamodbv2.model.ReturnConsumedCapacity
 import com.amazonaws.services.dynamodbv2.xspec.ExpressionSpecBuilder
 import org.apache.spark.sql.types.StructType
@@ -50,6 +50,37 @@ private[dynamodb] trait BaseScanner {
       config.maybeCredentials,
       config.maybeRegion,
       config.maybeEndpoint)
+  }
+
+  def getQuerySpec(config: ScanConfig): QuerySpec = {
+    val querySpec = new QuerySpec()
+      .withMaxPageSize(config.pageSize)
+      .withReturnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
+    val exprSpecBuilder = config.maybeRequiredColumns
+      .map(requiredColumns => new ExpressionSpecBuilder().addProjections(requiredColumns: _*))
+    val parsedProjectionExpr = exprSpecBuilder.map(xSpecBuilder => xSpecBuilder.buildForScan())
+    val projectionNameMap = parsedProjectionExpr.flatMap(projExpr => Option(projExpr.getNameMap))
+      .map(_.asScala.toMap).getOrElse(Map.empty)
+    val projectionValueMap = parsedProjectionExpr.flatMap(projExpr => Option(projExpr.getValueMap))
+      .map(_.asScala.toMap).getOrElse(Map.empty)
+    parsedProjectionExpr.foreach(expr =>
+      querySpec.withProjectionExpression(expr.getProjectionExpression))
+
+    // Parse any filter expression passed in as an option
+    val parsedFilterExpr = config.maybeFilterExpression
+      .map(filterExpression => ParsedFilterExpression(filterExpression))
+    val filterNameMap = parsedFilterExpr.map(_.expressionNames).getOrElse(Map.empty)
+    val filterValueMap = parsedFilterExpr.map(_.expressionValues).getOrElse(Map.empty)
+    parsedFilterExpr.foreach(expr =>
+      querySpec.withKeyConditionExpression(expr.expression))
+
+    // Combine parsed name and value maps from the projections and filter expressions
+    val nameMap = projectionNameMap ++ filterNameMap
+    Option(nameMap).filter(_.nonEmpty).foreach(nMap => querySpec.withNameMap(nMap.asJava))
+    val valueMap = projectionValueMap ++ filterValueMap
+    Option(valueMap).filter(_.nonEmpty).foreach(vMap => querySpec.withValueMap(vMap.asJava))
+
+    querySpec
   }
 
   def getScanSpec(config: ScanConfig): ScanSpec = {
@@ -99,6 +130,7 @@ private[dynamodb] case class ScanConfig(
   maybeRateLimit: Option[Int] = None,
   maybeCredentials: Option[String] = None,
   maybeRegion: Option[String] = None,
-  maybeEndpoint: Option[String] = None
+  maybeEndpoint: Option[String] = None,
+  maybeKeyExpression: Option[String] = None
 )
 

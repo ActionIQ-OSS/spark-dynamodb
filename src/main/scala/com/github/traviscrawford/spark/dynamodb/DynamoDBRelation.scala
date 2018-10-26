@@ -39,8 +39,9 @@ private[dynamodb] case class DynamoDBRelation(
   maybeRegion: Option[String],
   maybeSchema: Option[StructType],
   maybeCredentials: Option[String] = None,
-  maybeEndpoint: Option[String])
-  (@transient val sqlContext: SQLContext)
+  maybeEndpoint: Option[String],
+  maybeKeyExpression: Option[String]
+)(@transient val sqlContext: SQLContext)
   extends BaseRelation with PrunedScan with BaseScanner {
 
   private val log = LoggerFactory.getLogger(this.getClass)
@@ -85,7 +86,9 @@ private[dynamodb] case class DynamoDBRelation(
         maybeRateLimit = maybeRateLimit,
         maybeCredentials = maybeCredentials,
         maybeRegion = maybeRegion,
-        maybeEndpoint = maybeEndpoint)
+        maybeEndpoint = maybeEndpoint,
+        maybeKeyExpression = maybeKeyExpression
+      )
     })
 
     val tableDesc = Table.describe()
@@ -101,45 +104,89 @@ private[dynamodb] case class DynamoDBRelation(
   }
 
   def scan(config: ScanConfig): Iterator[Row] = {
-    val scanSpec = getScanSpec(config)
     val table = getTable(config)
-    val result = table.scan(scanSpec)
-    val failureCounter = new AtomicLong()
+    config.maybeKeyExpression match {
+      case None =>
+        val scanSpec = getScanSpec(config)
+        val result = table.scan(scanSpec)
+        val failureCounter = new AtomicLong()
 
-    val maybeRateLimiter = config.maybeRateLimit.map(rateLimit => {
-      log.info(s"Segment ${config.segment} using rate limit of $rateLimit")
-      RateLimiter.create(rateLimit)
-    })
-
-    // Each `pages.next` call results in a DynamoDB network call.
-    result.pages().iterator().flatMap(page => {
-      // This result set resides in local memory.
-      val rows = page.iterator().flatMap(item => {
-        try {
-          Some(ItemConverter.toRow(item, config.maybeSchema.get))
-        } catch {
-          case NonFatal(err) =>
-            // Log some example conversion failures but do not spam the logs.
-            if (failureCounter.incrementAndGet() < 3) {
-              log.error(s"Failed converting item to row: ${item.toJSON}", err)
-            }
-            None
-        }
-      })
-
-      // Blocks until rate limit is available.
-      maybeRateLimiter.foreach(rateLimiter => {
-        // DynamoDBLocal.jar does not implement consumed capacity
-        val maybeConsumedCapacityUnits = Option(page.getLowLevelResult.getScanResult.getConsumedCapacity)
-          .map(_.getCapacityUnits)
-          .map(math.ceil(_).toInt)
-
-        maybeConsumedCapacityUnits.foreach(consumedCapacityUnits => {
-          rateLimiter.acquire(consumedCapacityUnits)
+        val maybeRateLimiter = config.maybeRateLimit.map(rateLimit => {
+          log.info(s"Segment ${config.segment} using rate limit of $rateLimit")
+          RateLimiter.create(rateLimit)
         })
-      })
 
-      rows
-    })
+        // Each `pages.next` call results in a DynamoDB network call.
+        result.pages().iterator().flatMap(page => {
+          // This result set resides in local memory.
+          val rows = page.iterator().flatMap(item => {
+            try {
+              Some(ItemConverter.toRow(item, config.maybeSchema.get))
+            } catch {
+              case NonFatal(err) =>
+                // Log some example conversion failures but do not spam the logs.
+                if (failureCounter.incrementAndGet() < 3) {
+                  log.error(s"Failed converting item to row: ${item.toJSON}", err)
+                }
+                None
+            }
+          })
+
+          // Blocks until rate limit is available.
+          maybeRateLimiter.foreach(rateLimiter => {
+            // DynamoDBLocal.jar does not implement consumed capacity
+            val maybeConsumedCapacityUnits = Option(page.getLowLevelResult.getScanResult.getConsumedCapacity)
+              .map(_.getCapacityUnits)
+              .map(math.ceil(_).toInt)
+
+            maybeConsumedCapacityUnits.foreach(consumedCapacityUnits => {
+              rateLimiter.acquire(consumedCapacityUnits)
+            })
+          })
+
+          rows
+        })
+      case Some(keyCondition) =>
+        val querySpec = getQuerySpec(config)
+        val result = table.query(querySpec)
+        val failureCounter = new AtomicLong()
+
+        val maybeRateLimiter = config.maybeRateLimit.map(rateLimit => {
+          log.info(s"Segment ${config.segment} using rate limit of $rateLimit")
+          RateLimiter.create(rateLimit)
+        })
+
+        // Each `pages.next` call results in a DynamoDB network call.
+        result.pages().iterator().flatMap(page => {
+          // This result set resides in local memory.
+          val rows = page.iterator().flatMap(item => {
+            try {
+              Some(ItemConverter.toRow(item, config.maybeSchema.get))
+            } catch {
+              case NonFatal(err) =>
+                // Log some example conversion failures but do not spam the logs.
+                if (failureCounter.incrementAndGet() < 3) {
+                  log.error(s"Failed converting item to row: ${item.toJSON}", err)
+                }
+                None
+            }
+          })
+
+          // Blocks until rate limit is available.
+          maybeRateLimiter.foreach(rateLimiter => {
+            // DynamoDBLocal.jar does not implement consumed capacity
+            val maybeConsumedCapacityUnits = Option(page.getLowLevelResult.getQueryResult.getConsumedCapacity)
+              .map(_.getCapacityUnits)
+              .map(math.ceil(_).toInt)
+
+            maybeConsumedCapacityUnits.foreach(consumedCapacityUnits => {
+              rateLimiter.acquire(consumedCapacityUnits)
+            })
+          })
+
+          rows
+        })
+
+    }
   }
 }
